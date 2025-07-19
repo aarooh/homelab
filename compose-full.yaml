@@ -1,0 +1,244 @@
+networks:
+  homelab:
+    name: homelab
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  jellyfin_config:
+  homepage_config:
+  jellyseerr_config:
+  radarr_config:
+  sonarr_config:
+  bazarr_config:
+  prowlarr_config:
+  qbittorrent_config:
+  gluetun_config:
+
+services:
+  # VPN Service - All torrent traffic goes through this
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "8080:8080"   # qBittorrent Web UI
+      - "6881:6881"   # qBittorrent torrenting port
+      - "6881:6881/udp" # qBittorrent torrenting port UDP
+      - "9696:9696"   # Prowlarr
+    volumes:
+      - gluetun_config:/gluetun
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
+      - VPN_TYPE=${VPN_TYPE}
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES}
+      - SERVER_COUNTRIES=${SERVER_COUNTRIES}
+      - SERVER_CITIES=${SERVER_CITIES}
+      - FIREWALL_OUTBOUND_SUBNETS=${FIREWALL_OUTBOUND_SUBNETS}
+      - HEALTH_VPN_DURATION_INITIAL=${HEALTH_VPN_DURATION_INITIAL:-120s}
+      - DNS_ADDRESS=${DNS_ADDRESS:-162.252.172.57}
+      - DOT=off
+      - IPV6=off
+      - TZ=${TZ}
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.10
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://www.google.com"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Torrent Client
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WEBUI_PORT=8080
+    volumes:
+      - qbittorrent_config:/config
+      - ${DATA_ROOT}/downloads:/downloads
+      - ${DATA_ROOT}/media:/media
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Indexer Manager
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - prowlarr_config:/config
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Cloudflare Bypass
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=${TZ}
+    ports:
+      - "8191:8191"
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.11
+    restart: unless-stopped
+
+  # Movie Management
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - radarr_config:/config
+      - ${DATA_ROOT}/media/movies:/movies
+      - ${DATA_ROOT}/downloads:/downloads
+    ports:
+      - "7878:7878"
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.12
+    restart: unless-stopped
+
+  # TV Show Management
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - sonarr_config:/config
+      - ${DATA_ROOT}/media/tv:/tv
+      - ${DATA_ROOT}/downloads:/downloads
+    ports:
+      - "8989:8989"
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.13
+    restart: unless-stopped
+
+  # Subtitle Management
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - bazarr_config:/config
+      - ${DATA_ROOT}/media/movies:/movies
+      - ${DATA_ROOT}/media/tv:/tv
+    ports:
+      - "6767:6767"
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.14
+    restart: unless-stopped
+
+  # Media Server
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - jellyfin_config:/config
+      - ${DATA_ROOT}/media/movies:/data/movies
+      - ${DATA_ROOT}/media/tv:/data/tvshows
+      - ${DATA_ROOT}/media/music:/data/music
+    ports:
+      - "8096:8096"
+      - "8920:8920"  # HTTPS
+      - "7359:7359/udp"  # Auto-discovery
+      - "1900:1900/udp"  # DLNA
+    devices:
+      - /dev/dri:/dev/dri  # Hardware acceleration (optional)
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.15
+    restart: unless-stopped
+
+  # Request Management
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    environment:
+      - LOG_LEVEL=debug
+      - TZ=${TZ}
+    volumes:
+      - jellyseerr_config:/app/config
+    ports:
+      - "5055:5055"
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.16
+    restart: unless-stopped
+
+  # Dashboard
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+    volumes:
+      - homepage_config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "3000:3000"
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.17
+    restart: unless-stopped
+
+  # Container Health Monitor
+  autoheal:
+    image: willfarrell/autoheal
+    container_name: autoheal
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=5
+      - AUTOHEAL_START_PERIOD=0
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=10
+      - TZ=${TZ}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      homelab:
+        ipv4_address: 172.20.0.18
+    restart: unless-stopped 
